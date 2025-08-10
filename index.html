@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Marathi Fluency Sprint — PWA</title>
+  <meta name="description" content="30-day Marathi speaking practice with timers, roleplay, flashcards, speech-to-text, and journaling.">
+  <meta name="theme-color" content="#059669">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icons/icon-192.png">
+  <link rel="apple-touch-icon" href="./icons/icon-192.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script>
+    document.documentElement.classList.add('bg-slate-50');
+    // SW register
+    window.addEventListener('load', () => {
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('./sw.js').catch(()=>{});
+      }
+    });
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    .card { border-radius: 1rem; border: 1px solid rgb(226 232 240); background: white; box-shadow: 0 1px 2px rgba(16,24,40,.06); }
+    .btn { display: inline-flex; align-items: center; justify-content: center; gap: .5rem; border-radius: .75rem; padding: .5rem 1rem; font-size: .875rem; font-weight: 500; border: 1px solid rgb(226 232 240); }
+    .btn-primary { background: rgb(5 150 105); color: white; border-color: rgb(4 120 87); }
+    .btn-primary:hover { background: rgb(4 120 87); }
+    .btn-ghost { border-color: transparent; }
+    .btn-ghost:hover { background: rgb(241 245 249); }
+    .btn-outline { background: white; }
+    .btn-outline:hover { background: rgb(248 250 252); }
+    .tab { padding: .5rem 1rem; border-radius: .75rem; border: 1px solid rgb(226 232 240); font-size: .875rem; }
+    .tab-active { background: rgb(15 23 42); color: white; border-color: rgb(15 23 42); }
+    .progress { height: 12px; }
+    .pill { display:inline-flex; align-items:center; gap:.5rem; padding:.25rem .75rem; border-radius:999px; }
+    .pill-orange { background:#fff7ed; color:#9a3412; border:1px solid #fed7aa; }
+    .blink { animation: blink 1s step-end infinite; } @keyframes blink { 50% { opacity: 0; } }
+    .install-banner { position: fixed; inset: auto 0 16px; display:flex; justify-content:center; pointer-events:none; }
+    .install-banner > div { pointer-events:auto; }
+  </style>
+</head>
+<body class="min-h-screen text-slate-900">
+  <div id="root"></div>
+
+  <!-- Install Banner -->
+  <div class="install-banner hidden" id="installBanner">
+    <div class="card px-4 py-3 mx-4 flex items-center gap-3">
+      <span>Install <strong>Marathi Fluency Sprint</strong>?</span>
+      <button class="btn btn-primary" id="installBtn">Install</button>
+      <button class="btn btn-ghost" id="dismissBtn">Dismiss</button>
+    </div>
+  </div>
+
+  <script>
+    // Handle PWA install prompt
+    let deferredPrompt = null;
+    const banner = document.getElementById('installBanner');
+    const installBtn = document.getElementById('installBtn');
+    const dismissBtn = document.getElementById('dismissBtn');
+
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      deferredPrompt = e;
+      banner.classList.remove('hidden');
+    });
+    installBtn?.addEventListener('click', async () => {
+      banner.classList.add('hidden');
+      if (deferredPrompt) {
+        deferredPrompt.prompt();
+        await deferredPrompt.userChoice;
+        deferredPrompt = null;
+      }
+    });
+    dismissBtn?.addEventListener('click', () => banner.classList.add('hidden'));
+  </script>
+
+  <script type="text/babel">
+    const { useEffect, useMemo, useRef, useState } = React;
+    const LS_KEY = "mfs_pwa_v1";
+    const intervals = [1,2,4,7,14,30];
+    function nextReviewDate(level){ const now=new Date(); now.setDate(now.getDate()+intervals[Math.min(level, intervals.length-1)]); return now.toISOString(); }
+    function formatSecs(s){ const m=Math.floor(s/60), r=s%60; return `${String(m).padStart(2,"0")}:${String(r).padStart(2,"0")}`; }
+    function useLocalState(defaultState){
+      const [state, setState] = React.useState(()=>{ try{ const raw=localStorage.getItem(LS_KEY); return raw ? {...defaultState, ...JSON.parse(raw)} : defaultState; }catch{return defaultState;} });
+      React.useEffect(()=>{ localStorage.setItem(LS_KEY, JSON.stringify(state)); },[state]);
+      return [state, setState];
+    }
+    function useTimer(){ const [secs,setSecs]=React.useState(0); const [running,setRunning]=React.useState(false);
+      React.useEffect(()=>{ if(!running) return; const id=setInterval(()=>setSecs(s=>s+1),1000); return ()=>clearInterval(id); },[running]);
+      return {secs, running, setRunning, reset: ()=>setSecs(0)}; }
+    function speak(text, lang="mr-IN"){ const synth=window.speechSynthesis; if(!synth) return; const u=new SpeechSynthesisUtterance(text); u.lang=lang; synth.speak(u); }
+    function pickLang(cands){ try{ const L=navigator.languages||[]; for(const w of cands){ if(L.includes(w)) return w; } }catch{} return cands[0]; }
+    function useSTT({ langCandidates=["mr-IN","mr","en-IN","en-GB","en-US"], interim=true }={}){
+      const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const supported = !!Recognition;
+      const [listening,setListening]=React.useState(false);
+      const [transcript,setTranscript]=React.useState("");
+      const [error,setError]=React.useState("");
+      const recRef = React.useRef(null);
+      React.useEffect(()=>{
+        if(!supported) return;
+        const rec=new Recognition();
+        rec.lang = pickLang(langCandidates);
+        rec.interimResults = interim;
+        rec.continuous = true;
+        rec.onresult = (e)=>{
+          let finalText=\"\";
+          for(let i=e.resultIndex;i<e.results.length;i++){ finalText += e.results[i][0].transcript; }
+          setTranscript(t=> (t ? t.replace(/\\s+$/,' ') : '') + finalText);
+        };
+        rec.onerror = (e)=> setError(e.error || 'Unknown error');
+        rec.onend = ()=> setListening(false);
+        recRef.current = rec;
+        return ()=>{ try{ rec.stop(); }catch{} };
+      },[]);
+      function start(){ if(!supported){ alert('Speech Recognition not supported in this browser.'); return; } setTranscript(''); setError(''); try{ recRef.current?.start(); setListening(true);}catch(e){ setError(String(e)); } }
+      function stop(){ try{ recRef.current?.stop(); }catch{} }
+      return { supported, listening, transcript, error, start, stop, setTranscript };
+    }
+
+    const dayPlan = Array.from({length:30}, (_,i)=>i+1).map((d)=>{
+      const themes=[
+        { en: "Market & Groceries", mr: "बाजार व भाजी" },
+        { en: "Travel & Directions", mr: "प्रवास व दिशा" },
+        { en: "Work: Meetings", mr: "काम: मीटिंग" },
+        { en: "Hospital/Clinic", mr: "रुग्णालय" },
+        { en: "Home & Family", mr: "घर व कुटुंब" },
+        { en: "Restaurants & Ordering", mr: "हॉटेल व ऑर्डर" },
+        { en: "Small Talk & Weather", mr: "गप्पा व हवामान" },
+        { en: "Phone & Appointments", mr: "फोन व अपॉइंटमेंट" },
+        { en: "Shopping & Bargaining", mr: "खरेदी व भाव" },
+        { en: "Storytelling (Past)", mr: "कथा सांगणे (भूतकाळ)" },
+      ];
+      const t = themes[(d-1)%themes.length];
+      return { day:d, theme:t, microGoals:[
+        { en: "Listen 10 min", mr: "१० मिनिटे ऐका" },
+        { en: "Shadow 5 lines", mr: "५ वाक्ये शॅडो करा" },
+        { en: "Speak 3 min", mr: "३ मिनिटे बोला" },
+        { en: "Learn 5 phrases", mr: "५ वाक्ये शिका" },
+      ]};
+    });
+
+    const phrasePacks = {
+      daily: [
+        { mr: "मला भाजी हवी आहे.", en: "I want vegetables." },
+        { mr: "किंमत किती आहे?", en: "How much is the price?" },
+        { mr: "जरा स्वस्त देता का?", en: "Can you give it a bit cheaper?" },
+        { mr: "आता मी ऑफिसला जात आहे.", en: "I am going to the office now." },
+        { mr: "थोडं सावकाश बोला, कृपया.", en: "Please speak a little slowly." },
+        { mr: "मला समजलं नाही—परत सांगाल का?", en: "I didn’t understand—could you repeat?" },
+      ],
+      work: [
+        { mr: "मी ऑन्कॉलॉजी सेल्समध्ये काम करतो.", en: "I work in oncology sales." },
+        { mr: "ही प्रेझेन्टेशन आपण पाहू या.", en: "Let’s review this presentation." },
+        { mr: "आपण पुढच्या आठवड्यात भेटू शकतो का?", en: "Can we meet next week?" },
+        { mr: "हा उत्पादन क्लिनिकल डेटा-आधारित आहे.", en: "This product is backed by clinical data." },
+        { mr: "आपले अभिप्राय महत्त्वाचे आहेत.", en: "Your feedback is important." },
+      ],
+      travel: [
+        { mr: "बसस्टॉप कुठे आहे?", en: "Where is the bus stop?" },
+        { mr: "तिकडे उजवीकडे वळा.", en: "Turn right over there." },
+        { mr: "किती वेळ लागेल?", en: "How long will it take?" },
+        { mr: "मला पुण्यासाठी तिकीट हवे आहे.", en: "I need a ticket to Pune." },
+      ],
+    };
+
+    function App(){
+      const [state, setState] = useLocalState({
+        day: 1, showEnglish: false, completed: {}, streak: 0, lastOpenDate: new Date().toDateString(),
+        journal: "", cards: initializeCards(), tab: "practice",
+      });
+      React.useEffect(()=>{
+        const today = new Date().toDateString();
+        if(state.lastOpenDate !== today){
+          const diff = (new Date(today) - new Date(state.lastOpenDate)) / (1000*3600*24);
+          const newStreak = diff === 1 ? (state.streak+1) : 1;
+          setState(s=>({...s, streak: newStreak, lastOpenDate: today}));
+        }
+      },[]);
+
+      const plan = dayPlan[state.day-1];
+      const { secs, running, setRunning, reset } = useTimer();
+      const todayDone = React.useMemo(()=>{
+        const keys=["listen","shadow","speak","phrases"];
+        return keys.map(k => !!state.completed[`${state.day}-${k}`]);
+      },[state.completed, state.day]);
+      const progress = (todayDone.filter(Boolean).length/4)*100;
+      const dueCards = React.useMemo(()=>{
+        const now = new Date();
+        return state.cards.filter(c => new Date(c.due) <= now).slice(0, 12);
+      },[state.cards]);
+
+      function toggleDone(key){ setState(s=>({...s, completed:{...s.completed, [`${state.day}-${key}`]: !s.completed[`${state.day}-${key}`]}})); }
+      function jumpDay(d){ setState(s=> ({...s, day: Math.min(30, Math.max(1, s.day+d)) })); }
+      function addCard(p){ setState(s=>{ const cards=[...s.cards]; if(!cards.find(c=>c.mr===p.mr)){ cards.push({...p, level:0, due: nextReviewDate(0)}); } return {...s, cards}; }); }
+      function reviewCard(card, ease){
+        setState(s=>{
+          const cards = s.cards.map(c=>{
+            if(c.mr !== card.mr) return c;
+            let level = c.level;
+            if(ease===0) level = Math.max(0, level-1);
+            if(ease===1) level = Math.min(level+1, intervals.length-1);
+            if(ease===2) level = Math.min(level+2, intervals.length-1);
+            return {...c, level, due: nextReviewDate(level)};
+          });
+          return {...s, cards};
+        });
+      }
+      function exportCSV(){
+        const rows = [["mr","en","level","due"], ...state.cards.map(c=>[c.mr,c.en,c.level,c.due])];
+        const csv = rows.map(r => r.map(x => `"${(x??"").toString().replaceAll('"','""')}"`).join(",")).join("\n");
+        const blob = new Blob([csv], {type:"text/csv"});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href=url; a.download="marathi_phrase_deck.csv"; a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      return (
+        <div className="max-w-6xl mx-auto p-4 md:p-8">
+          <header className="flex items-center justify-between mb-6">
+            <div>
+              <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">Marathi Fluency Sprint</h1>
+              <p className="text-slate-600">30 days · input → shadow → speak → feedback</p>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="pill pill-orange">🔥 {state.streak} day streak</span>
+              <label className="inline-flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={state.showEnglish} onChange={e=>setState(s=>({...s, showEnglish: e.target.checked}))} />
+                Show English
+              </label>
+            </div>
+          </header>
+
+          <div className="card p-4 md:p-6 mb-6">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-lg font-semibold">Day {plan.day}: <span className="font-normal text-slate-700">{plan.theme.mr}</span> {state.showEnglish && <span className="text-slate-500">· {plan.theme.en}</span>}</h2>
+              <div className="flex gap-2">
+                <button className="btn btn-outline" onClick={()=>jumpDay(-1)} disabled={state.day===1}>← Prev</button>
+                <button className="btn btn-primary" onClick={()=>jumpDay(1)} disabled={state.day===30}>Next →</button>
+              </div>
+            </div>
+            <p className="text-slate-500 mt-1">Complete all four micro-goals to close the ring.</p>
+            <div className="w-full bg-slate-200 rounded-full overflow-hidden mt-3" style={{height:"12px"}}>
+              <div className="h-full bg-emerald-600 transition-all" style={{width: `${progress}%`}}></div>
+            </div>
+            <div className="grid md:grid-cols-4 gap-3 mt-4">
+              {[
+                { key:"listen", labelMr:"ऐकणे", labelEn:"Listen 10 min", icon:"🎧" },
+                { key:"shadow", labelMr:"शॅडो", labelEn:"Shadow 5 lines", icon:"🗣️" },
+                { key:"speak", labelMr:"बोलणे", labelEn:"Speak 3 min", icon:"🎙️" },
+                { key:"phrases", labelMr:"वाक्ये", labelEn:"Learn 5 phrases", icon:"📚" },
+              ].map((it,idx)=>(
+                <button key={it.key}
+                        onClick={()=>toggleDone(it.key)}
+                        className={"btn w-full justify-between " + (todayDone[idx] ? "bg-emerald-600 text-white border-emerald-700" : "btn-outline")}>
+                  <span className="flex items-center gap-2">{it.icon} {it.labelMr} {state.showEnglish && <span className="opacity-80 md:opacity-100 md:text-slate-600">· {it.labelEn}</span>}</span>
+                  {todayDone[idx] && <span>✔</span>}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <Tabs tab={state.tab} setTab={(tab)=>setState(s=>({...s, tab}))} />
+
+          {state.tab==="practice" && <Practice/>}
+          {state.tab==="roleplay" && <Roleplay showEnglish={state.showEnglish}/>}
+          {state.tab==="shadow" && <Shadow themeMr={plan.theme.mr}/>}
+          {state.tab==="flash" && <Flashcards dueCards={dueCards} showEnglish={state.showEnglish} onReview={reviewCard} exportCSV={exportCSV} addCard={addCard}/>}
+          {state.tab==="builder" && <Builder addCard={addCard}/>}
+          {state.tab==="journal" && <Journal value={state.journal} onChange={(v)=>setState(s=>({...s, journal:v}))}/>}
+
+          <footer className="text-center text-xs text-slate-500 mt-8">PWA · Works offline after first load · शुभेच्छा!</footer>
+        </div>
+      );
+    }
+
+    function Tabs({tab, setTab}){
+      const tabs=[["practice","Daily Practice"],["roleplay","Roleplay"],["shadow","Shadowing"],["flash","Flashcards"],["builder","Vocab Builder"],["journal","Journal"]];
+      return (<div className="flex flex-wrap gap-2 mb-4">{tabs.map(([k,l])=>(<button key={k} className={"tab "+(tab===k?"tab-active":"")} onClick={()=>setTab(k)}>{l}</button>))}</div>);
+    }
+
+    function Practice(){
+      const { secs, running, setRunning, reset } = useTimer();
+      const rec = useRecorder();
+      const stt = useSTT({ langCandidates: ["mr-IN","mr","en-IN","en-GB","en-US"] });
+      return (
+        <div className="grid md:grid-cols-2 gap-4 mb-6">
+          <div className="card p-4">
+            <h3 className="font-semibold text-lg mb-1">🎧 Listening Timer</h3>
+            <p className="text-slate-600 mb-3">Set a 10‑min sprint. Use any Marathi audio/video (avoid subtitles).</p>
+            <div className="text-4xl font-mono">{formatSecs(secs)}</div>
+            <div className="flex gap-2 mt-3">
+              {!running ? (<button className="btn btn-primary" onClick={()=>setRunning(true)}>Start</button>) : (<button className="btn btn-outline" onClick={()=>setRunning(false)}>Pause</button>)}
+              <button className="btn btn-ghost" onClick={reset}>Reset</button>
+            </div>
+          </div>
+
+          <div className="card p-4">
+            <h3 className="font-semibold text-lg mb-1">🎙️ Self-Recording</h3>
+            <p className="text-slate-600 mb-3">Speak your 3‑minute self-talk. Save & replay for feedback.</p>
+            <div className="flex gap-2">
+              {!rec.recording ? (<button className="btn btn-primary" onClick={rec.start}>Record</button>) : (<button className="btn btn-outline" onClick={rec.stop}>Stop</button>)}
+            </div>
+            {rec.url && <audio controls className="mt-3 w-full" src={rec.url}></audio>}
+          </div>
+
+          <div className="card p-4 md:col-span-2">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold text-lg">📝 Live Transcribe (Speech → Text)</h3>
+              {stt.supported ? (!stt.listening ? <button className="btn btn-primary" onClick={stt.start}>Start Transcription</button> : <button className="btn btn-outline" onClick={stt.stop}>Stop</button>) : <span className="pill pill-orange">Not supported in this browser</span>}
+            </div>
+            <p className="text-slate-600 mt-1">Language: Marathi (<code>mr-IN</code>) fallback to English if unavailable.</p>
+            {stt.error && <p className="text-red-600 mt-2">Error: {stt.error}</p>}
+            <div className="mt-3 border rounded-xl p-3 min-h-[6rem] whitespace-pre-wrap">
+              {stt.transcript || <span className="text-slate-400">Start and speak…</span>}
+              {stt.listening && <span className="blink"> ▍</span>}
+            </div>
+            <div className="flex justify-end gap-2 mt-2">
+              <button className="btn btn-ghost" onClick={()=>stt.setTranscript("")}>Clear</button>
+              <button className="btn btn-outline" onClick={()=>{ navigator.clipboard?.writeText(stt.transcript||""); }}>Copy</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function useRecorder(){
+      const [recording, setRecording] = React.useState(false);
+      const [url, setUrl] = React.useState("");
+      const chunks = React.useRef([]);
+      const recRef = React.useRef(null);
+      React.useEffect(()=>()=> { if(url) URL.revokeObjectURL(url); }, [url]);
+      const start = async ()=>{
+        if(!navigator.mediaDevices?.getUserMedia) { alert("Microphone not available"); return; }
+        const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+        const rec = new MediaRecorder(stream);
+        recRef.current = rec; chunks.current = [];
+        rec.ondataavailable = e => chunks.current.push(e.data);
+        rec.onstop = ()=>{ const blob = new Blob(chunks.current, {type:"audio/webm"}); const u = URL.createObjectURL(blob); setUrl(u); };
+        rec.start(); setRecording(true);
+      };
+      const stop = ()=>{ recRef.current?.stop(); setRecording(false); };
+      return { recording, url, start, stop };
+    }
+
+    function Roleplay({showEnglish}){
+      const scenarios=[
+        { tag:"Market", mr:"भाजी घ्यायची आहे", prompt:"विक्रेत्याशी भाव करा; किंमत, ताजेपणा, वजन याबद्दल बोला." },
+        { tag:"Travel", mr:"टॅक्सी बुक करा", prompt:"चालकाशी वेळ, मार्ग व पैसे याबद्दल चर्चा करा." },
+        { tag:"Work", mr:"मीटिंग ठरवा", prompt:"डॉक्टर/क्लायंटशी वेळ, अजेंडा व पुढची पावलं." },
+        { tag:"Restaurant", mr:"ऑर्डर देणे", prompt:"आहार पसंती, तिखटपणा, व बिलाबद्दल बोला." },
+        { tag:"Story", mr:"कालचा दिवस", prompt:"भूतकाळात ५-७ वाक्यांत तुमचा दिवस सांगा." },
+      ];
+      const [i,setI]=React.useState(0);
+      const s = scenarios[i % scenarios.length];
+      const prompts = buildPrompts(s.tag);
+      const [yourLine, setYourLine] = React.useState("");
+      const [partner, setPartner] = React.useState("");
+      const sttA = useSTT(); const sttB = useSTT();
+      React.useEffect(()=>{ setYourLine(""); setPartner(""); }, [i]);
+      React.useEffect(()=>{ if(!sttA.listening) setYourLine(prev => (sttA.transcript || prev)); }, [sttA.listening]);
+      React.useEffect(()=>{ if(!sttB.listening) setPartner(prev => (sttB.transcript || prev)); }, [sttB.listening]);
+      return (
+        <div className="card p-4 mb-6">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="font-semibold">Scenario: {s.mr} <span className="text-slate-500">· {s.tag}</span></h3>
+            <div className="flex gap-2">
+              <button className="btn btn-outline" onClick={()=>setI(i+1)}>New</button>
+              <button className="btn btn-outline" onClick={()=>speak(prompts.roleA.map(p=>p.mr).join(". "))}>Play A</button>
+              <button className="btn btn-outline" onClick={()=>speak(prompts.roleB.map(p=>p.mr).join(". "))}>Play B</button>
+            </div>
+          </div>
+          <p className="text-slate-600 mb-3">{s.prompt}</p>
+          <div className="grid md:grid-cols-2 gap-4">
+            <div className="grid gap-2">
+              <Roleblock title="You (A)" lines={prompts.roleA} showEnglish={showEnglish} />
+              <Roleblock title="Partner (B)" lines={prompts.roleB} showEnglish={showEnglish} />
+            </div>
+            <div>
+              <h4 className="font-semibold mb-2">Practice Pad</h4>
+              <div className="grid gap-3">
+                <div>
+                  <label className="text-sm">Your line (Marathi)</label>
+                  <div className="flex gap-2 items-start">
+                    <textarea className="w-full border rounded-xl p-2" rows="3" value={yourLine} onChange={e=>setYourLine(e.target.value)} placeholder="इथे तुमचे वाक्य…"></textarea>
+                    <div className="flex flex-col gap-2">
+                      {!sttA.listening ? <button className="btn btn-primary" onClick={sttA.start} title="Dictate (A)">🎤</button> : <button className="btn btn-outline" onClick={sttA.stop} title="Stop (A)">■</button>}
+                      <button className="btn btn-ghost" onClick={()=>setYourLine("")}>Clear</button>
+                    </div>
+                  </div>
+                </div>
+                <div>
+                  <label className="text-sm">Partner line (Marathi)</label>
+                  <div className="flex gap-2 items-start">
+                    <textarea className="w-full border rounded-xl p-2" rows="3" value={partner} onChange={e=>setPartner(e.target.value)} placeholder="इथे समोरील व्यक्तीचे वाक्य…"></textarea>
+                    <div className="flex flex-col gap-2">
+                      {!sttB.listening ? <button className="btn btn-primary" onClick={sttB.start} title="Dictate (B)">🎤</button> : <button className="btn btn-outline" onClick={sttB.stop} title="Stop (B)">■</button>}
+                      <button className="btn btn-ghost" onClick={()=>setPartner("")}>Clear</button>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button className="btn btn-primary" onClick={()=>speak(yourLine || "")}>Speak Your Line</button>
+                  <button className="btn btn-ghost" onClick={()=>{ setYourLine(""); setPartner(""); }}>Reset</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function Roleblock({title, lines, showEnglish}){
+      return (
+        <div className="border rounded-xl p-3 bg-slate-50">
+          <h5 className="font-medium mb-2">{title}</h5>
+          <div className="grid gap-2">
+            {lines.map((l,idx)=>(
+              <div key={idx} className="p-2 rounded-lg border bg-white flex items-start gap-3">
+                <button className="btn btn-ghost" onClick={()=>speak(l.mr)}>🔊</button>
+                <div>
+                  <div className="font-medium">{l.mr}</div>
+                  {showEnglish && <div className="text-sm text-slate-500">{l.en}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function Shadow({themeMr}){
+      const lines = [
+        "कृपया थोडं सावकाश बोला.",
+        "मी पुन्हा सांगतो/सांगते.",
+        "हे बरोबर आहे का?",
+        "मला अजून सरावाची गरज आहे.",
+        `आजचा विषय: ${themeMr}.`,
+      ];
+      return (
+        <div className="card p-4 mb-6">
+          <h3 className="font-semibold text-lg mb-1">🗣️ Shadowing Lines</h3>
+          <p className="text-slate-600 mb-3">Click a sentence to play it; mimic rhythm and intonation exactly.</p>
+          <div className="grid gap-2">
+            {lines.map((line, i)=>(
+              <button key={i} onClick={()=>speak(line)} className="text-left p-3 rounded-xl border bg-white hover:bg-slate-50 flex items-start gap-3">
+                🔊 <span>{line}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function Flashcards({dueCards, showEnglish, onReview, exportCSV, addCard}){
+      return (
+        <div className="card p-4 mb-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-semibold text-lg">🧠 Flashcards <span className="text-slate-500">(Due: {dueCards.length})</span></h3>
+              <p className="text-slate-600">SRS‑lite. Click to flip, then rate: Again / Good / Easy.</p>
+            </div>
+            <button className="btn btn-outline" onClick={exportCSV}>Export CSV</button>
+          </div>
+          {dueCards.length===0 ? (<p className="text-slate-600 mt-3">No cards due. Add from packs below or Vocab Builder.</p>) : (
+            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4 mt-4">
+              {dueCards.map((c)=>(<Flashcard key={c.mr} card={c} onReview={onReview} showEnglish={showEnglish} />))}
+            </div>
+          )}
+          <div className="mt-6 grid md:grid-cols-3 gap-3">
+            {Object.entries(phrasePacks).map(([k, arr])=> (
+              <div key={k} className="border-2 border-dashed rounded-2xl p-3">
+                <h4 className="font-semibold capitalize mb-1">Pack: {k}</h4>
+                <p className="text-sm text-slate-500 mb-2">Add any phrase to your deck</p>
+                <div className="grid gap-2">
+                  {arr.map((p)=>(
+                    <div key={p.mr} className="flex items-center justify-between gap-3 p-2 rounded-lg border">
+                      <div className="min-w-0">
+                        <div className="font-medium truncate">{p.mr}</div>
+                        {showEnglish && <div className="text-sm text-slate-500 truncate">{p.en}</div>}
+                      </div>
+                      <div className="flex gap-2">
+                        <button className="btn btn-ghost" onClick={()=>speak(p.mr)}>🔊</button>
+                        <button className="btn btn-primary" onClick={()=>addCard(p)}>Add</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function Flashcard({card, onReview, showEnglish}){
+      const [flip, setFlip] = React.useState(false);
+      return (
+        <div className="border rounded-2xl p-3 hover:shadow transition cursor-pointer" onClick={()=>setFlip(!flip)}>
+          <div className="text-sm text-slate-500 mb-1">Level {card.level+1}</div>
+          {!flip ? (<div className="text-xl leading-relaxed">{card.mr}</div>) : (<div className="text-xl text-slate-700">{showEnglish ? card.en : <span className="italic text-slate-400">(English hidden)</span>}</div>)}
+          <div className="flex gap-2 mt-3">
+            <button className="btn btn-outline" onClick={(e)=>{e.stopPropagation(); onReview(card,0);}}>Again</button>
+            <button className="btn btn-primary" onClick={(e)=>{e.stopPropagation(); onReview(card,1);}}>Good</button>
+            <button className="btn btn-ghost" onClick={(e)=>{e.stopPropagation(); onReview(card,2);}}>Easy</button>
+          </div>
+        </div>
+      );
+    }
+
+    function Builder({addCard}){
+      const [mr,setMr]=React.useState(""); const [en,setEn]=React.useState("");
+      const stt = useSTT(); React.useEffect(()=>{ if(!stt.listening) setMr(prev => (stt.transcript || prev)); }, [stt.listening]);
+      return (
+        <div className="card p-4 mb-6">
+          <h3 className="font-semibold text-lg mb-1">✨ Vocab Builder</h3>
+          <p className="text-slate-600 mb-3">Add your own phrase pairs. Keep them short and conversation-first.</p>
+          <div className="grid md:grid-cols-3 gap-3 items-end">
+            <div>
+              <label className="text-sm block mb-1">Marathi</label>
+              <div className="flex gap-2">
+                <input className="w-full border rounded-xl p-2" value={mr} onChange={e=>setMr(e.target.value)} placeholder="उदा. कृपया थांबा."/>
+                {!stt.listening ? <button className="btn btn-primary" onClick={stt.start} title="Dictate Marathi">🎤</button> : <button className="btn btn-outline" onClick={stt.stop} title="Stop">■</button>}
+              </div>
+            </div>
+            <div>
+              <label className="text-sm block mb-1">English</label>
+              <input className="w-full border rounded-xl p-2" value={en} onChange={e=>setEn(e.target.value)} placeholder="e.g., Please wait."/>
+            </div>
+            <div className="flex gap-2">
+              <button className="btn btn-primary" onClick={()=>{ if(!mr) return; addCard({mr, en}); setMr(""); setEn(""); }}>Add to Deck</button>
+              <button className="btn btn-ghost" onClick={()=>{ setMr(""); setEn(""); }}>Clear</button>
+            </div>
+          </div>
+          {stt.error && <p className="text-red-600 mt-2">Mic error: {stt.error}</p>}
+        </div>
+      );
+    }
+
+    function Journal({value, onChange}){
+      return (
+        <div className="card p-4 mb-6">
+          <h3 className="font-semibold text-lg mb-1">📓 Speaking Journal</h3>
+          <p className="text-slate-600 mb-3">Each week, record a 2–3 min clip and write reflection notes in Marathi.</p>
+          <textarea rows="8" className="w-full border rounded-xl p-3" value={value} onChange={(e)=>onChange(e.target.value)} placeholder="आज मी काय शिकलो/शिकले? आज बोलताना कुठे अडखळलो/अडखळले? पुढचे उद्दिष्ट काय?"></textarea>
+          <div className="flex justify-end mt-3">
+            <button className="btn btn-outline" onClick={()=>alert("Saved locally ✅")}>Save</button>
+          </div>
+        </div>
+      );
+    }
+
+    function buildPrompts(tag){
+      switch(tag){
+        case "Market": return { roleA:[{mr:"भाजी कितीला दिलीत?", en:"How much for the vegetables?"},{mr:"थोडं स्वस्त होईल का?", en:"Can you make it cheaper?"},{mr:"अर्धा किलो द्या, ताजी द्या.", en:"Half a kilo, make sure it's fresh."}], roleB:[{mr:"हे ताजं आहे, ५० रुपये किलो.", en:"Fresh, ₹50/kg."},{mr:"तुमच्यासाठी ४५ ठीक.", en:"For you, ₹45."},{mr:"घ्या, अजून काही?", en:"Here you go, anything else?"}] };
+        case "Travel": return { roleA:[{mr:"एअरपोर्टला किती वेळ?", en:"How long to the airport?"},{mr:"जरा लवकर चला, मीटिंग आहे.", en:"A bit faster, I have a meeting."},{mr:"ऑनलाइन पेमेंट चालेल?", en:"Is online payment okay?"}], roleB:[{mr:"साधारण ४० मिनिटे.", en:"About 40 minutes."},{mr:"ठीक, शॉर्टकट घेतो.", en:"Okay, I'll take a shortcut."},{mr:"हो, लिंक पाठवतो.", en:"Yes, I'll send a link."}] };
+        case "Work": return { roleA:[{mr:"डॉक्टर, पुढच्या आठवड्यात भेटू का?", en:"Doctor, shall we meet next week?"},{mr:"अजेंड्यात डेटा व किंमत आहे.", en:"Agenda: data & pricing."},{mr:"आपला सोयीचा वेळ?", en:"What time suits you?"}], roleB:[{mr:"गुरुवारी दुपारी चालेल.", en:"Thursday afternoon works."},{mr:"५ वाजता निश्चित.", en:"Let's fix 5 PM."},{mr:"मी मेलवर कन्फर्म करतो.", en:"I'll confirm on email."}] };
+        case "Restaurant": return { roleA:[{mr:"कमी तिखट पनीर द्या.", en:"Paneer with low spice, please."},{mr:"जलेबी उपलब्ध आहे का?", en:"Is jalebi available?"},{mr:"बिल एकत्र करा.", en:"Single bill, please."}], roleB:[{mr:"हो, तंदूरी रोटी पण आहे.", en:"Yes, we have tandoori roti."},{mr:"जलेबी संध्याकाळी मिळेल.", en:"Jalebi in the evening."},{mr:"आत्ताच बिल आणतो.", en:"Bringing the bill now."}] };
+        case "Story": return { roleA:[{mr:"काल सकाळी मी लवकर उठलो/उठले.", en:"I woke up early yesterday."},{mr:"मी जॉगिंगला गेलो/गेले.", en:"I went jogging."},{mr:"दुपारी मीटिंग झाली.", en:"Had a meeting in the afternoon."}], roleB:[{mr:"छान! संध्याकाळी काय केलं?", en:"Nice! What about evening?"},{mr:"मीटिंग कशी झाली?", en:"How was the meeting?"},{mr:"उद्या काय प्लॅन?", en:"Plan for tomorrow?"}] };
+        default: return {roleA:[], roleB:[]};
+      }
+    }
+
+    function initializeCards(){
+      const starters=[
+        ...phrasePacks.daily, ...phrasePacks.work, ...phrasePacks.travel
+      ];
+      return starters.map(p=>({...p, level:0, due: nextReviewDate(0)}));
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App/>);
+  </script>
+</body>
+</html>
